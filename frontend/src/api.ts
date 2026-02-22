@@ -133,3 +133,15 @@ export function getPdfUrl(filePath: string, page?: number): string {
   const url = `${BASE}/pdf/${encoded}`;
   return page ? `${url}#page=${page}` : url;
 }
+
+export function getFileUrl(filePath: string): string {
+  const encoded = filePath
+    .split("/")
+    .map(encodeURIComponent)
+    .join("/");
+  return `${BASE}/file/${encoded}`;
+}
+
+export function isPdf(filePath: string): boolean {
+  return filePath.toLowerCase().endsWith(".pdf");
+}

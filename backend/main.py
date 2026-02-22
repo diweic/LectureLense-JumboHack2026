@@ -3,12 +3,14 @@ FastAPI backend for the Slide Search Tool.
 
 Routes:
   GET  /browse-folder — open native OS folder picker dialog
-  POST /index   — index a folder of PDFs
-  POST /search  — semantic search across indexed slides
-  GET  /pdf/{path} — serve a PDF file for viewing
+  POST /index   — index a folder of documents (PDF, PPTX, DOCX, TXT)
+  POST /search  — semantic search across indexed content
+  GET  /file/{path} — serve a file for viewing
+  GET  /pdf/{path} — serve a PDF file (backward compat)
 """
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -23,7 +25,7 @@ import fitz  # PyMuPDF
 import chromadb
 import ollama
 
-from indexer import index_folder, CHROMA_DIR, COLLECTION_NAME, EMBED_MODEL
+from indexer import index_folder, CHROMA_DIR, COLLECTION_NAME, EMBED_MODEL, SUPPORTED_EXTENSIONS
 
 LLM_MODEL = "qwen3:1.7b"
 
@@ -248,9 +250,17 @@ def api_search(req: SearchRequest):
     return SearchResponse(query=query, results=results)
 
 
-@app.get("/pdf/{file_path:path}")
-def api_serve_pdf(file_path: str):
-    """Serve a PDF file from the indexed folder."""
+MIME_TYPES = {
+    ".pdf": "application/pdf",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".txt": "text/plain",
+}
+
+
+@app.get("/file/{file_path:path}")
+def api_serve_file(file_path: str):
+    """Serve an indexed file (PDF, PPTX, DOCX, TXT)."""
     root = _get_root_folder()
     if not root:
         raise HTTPException(status_code=400, detail="No indexed folder found")
@@ -258,15 +268,22 @@ def api_serve_pdf(file_path: str):
     full_path = Path(root) / file_path
     if not full_path.is_file():
         raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
-    if not full_path.suffix.lower() == ".pdf":
-        raise HTTPException(status_code=400, detail="Only PDF files can be served")
+    ext = full_path.suffix.lower()
+    if ext not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}")
 
     return FileResponse(
         path=str(full_path),
-        media_type="application/pdf",
+        media_type=MIME_TYPES.get(ext, "application/octet-stream"),
         filename=full_path.name,
         content_disposition_type="inline",
     )
+
+
+@app.get("/pdf/{file_path:path}")
+def api_serve_pdf(file_path: str):
+    """Serve a PDF file (backward compat)."""
+    return api_serve_file(file_path)
 
 
 @app.post("/summarize", response_model=SummarizeResponse)
@@ -298,7 +315,7 @@ def api_summarize(req: SummarizeRequest):
 
 @app.get("/page-image/{file_path:path}")
 def api_page_image(file_path: str, page: int = Query(..., ge=1)):
-    """Render a PDF page as a PNG image."""
+    """Render a page as a PNG image. Only supported for PDF files."""
     root = _get_root_folder()
     if not root:
         raise HTTPException(status_code=400, detail="No indexed folder found")
@@ -306,8 +323,11 @@ def api_page_image(file_path: str, page: int = Query(..., ge=1)):
     full_path = Path(root) / file_path
     if not full_path.is_file():
         raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
-    if not full_path.suffix.lower() == ".pdf":
-        raise HTTPException(status_code=400, detail="Only PDF files can be rendered")
+
+    ext = full_path.suffix.lower()
+    if ext != ".pdf":
+        # Non-PDF files don't have image previews
+        raise HTTPException(status_code=415, detail="Image preview only available for PDF files")
 
     doc = fitz.open(str(full_path))
     page_index = page - 1  # convert 1-indexed to 0-indexed
@@ -348,23 +368,29 @@ def api_chat(req: ChatRequest):
     # Build context from retrieved pages
     sources: list[ChatSource] = []
     context_parts: list[str] = []
+    citation_list: list[str] = []
     for i in range(min(len(raw["ids"][0]), req.n_context)):
         meta = raw["metadatas"][0][i]
         text = raw["documents"][0][i]
         fp = meta["file_path"]
         pg = meta["page_number"]
         sources.append(ChatSource(file_path=fp, page_number=pg))
-        context_parts.append(f"[Source: {fp}, Page {pg}]\n{text[:1500]}")
+        label = f"[{fp}, Page {pg}]"
+        context_parts.append(f"{label}\n{text[:1500]}")
+        citation_list.append(label)
 
     context_block = "\n\n---\n\n".join(context_parts)
+    citations_str = ", ".join(citation_list)
 
     # Build message history for the LLM
     system_prompt = (
         "/no_think\n"
-        "You are LectureLens, an AI assistant that helps students understand their lecture slides. "
-        "Answer based on the slide content provided below. "
-        "Cite which file and page number your answer comes from using [File, Page N] format. "
-        "If the slides don't contain enough information, say so honestly.\n\n"
+        "You are LectureLens. Answer using ONLY the slide content below.\n"
+        "Use this exact format:\n\n"
+        "**Relevant slides:** list each slide citation that answers the question\n\n"
+        "**Key points:** 2-3 bullet points explaining the answer, each citing its source\n\n"
+        f"Available citations: {citations_str}\n"
+        "Copy these citations exactly when referencing slides.\n\n"
         f"Slide content:\n{context_block}"
     )
 
@@ -376,6 +402,21 @@ def api_chat(req: ChatRequest):
     try:
         response = ollama.chat(model=LLM_MODEL, messages=messages)
         answer = response.message.content.strip()
+
+        # Post-process: replace generic [File, Page N] with real filenames.
+        # Build a map from page number to real citation label.
+        page_to_citation: dict[int, str] = {}
+        for s in sources:
+            page_to_citation[s.page_number] = f"[{s.file_path}, Page {s.page_number}]"
+
+        def _fix_citation(m: re.Match) -> str:
+            pg = int(m.group(1))
+            return page_to_citation.get(pg, m.group(0))
+
+        answer = re.sub(r"\[File,\s*Page\s+(\d+)\]", _fix_citation, answer)
+        # Also catch [file, page N] and [File, page N] variants
+        answer = re.sub(r"\[(?:[Ff]ile),\s*[Pp]age\s+(\d+)\]", _fix_citation, answer)
+
         return ChatResponse(answer=answer, sources=sources)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"LLM error: {e}")

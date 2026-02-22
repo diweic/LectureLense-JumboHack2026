@@ -17,7 +17,7 @@ import ollama
 EMBED_MODEL = "nomic-embed-text"
 CHROMA_DIR = os.path.join(os.path.dirname(__file__), "chroma_data")
 COLLECTION_NAME = "slides"
-SUPPORTED_EXTENSIONS = {".pdf"}
+SUPPORTED_EXTENSIONS = {".pdf", ".pptx", ".docx", ".txt"}
 
 
 def extract_pages_from_pdf(pdf_path: str) -> list[dict]:
@@ -38,6 +38,48 @@ def extract_pages_from_pdf(pdf_path: str) -> list[dict]:
     return pages
 
 
+def extract_pages_from_pptx(pptx_path: str) -> list[dict]:
+    """Extract text from each slide of a PPTX file."""
+    from pptx import Presentation
+    prs = Presentation(pptx_path)
+    pages = []
+    for i, slide in enumerate(prs.slides, start=1):
+        texts = []
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                texts.append(shape.text_frame.text)
+        text = "\n".join(texts).strip()
+        if text:
+            pages.append({"page_number": i, "text": text})
+    return pages
+
+
+def extract_pages_from_docx(docx_path: str) -> list[dict]:
+    """Extract text from a DOCX file as a single 'page'."""
+    from docx import Document
+    doc = Document(docx_path)
+    text = "\n".join(p.text for p in doc.paragraphs).strip()
+    if text:
+        return [{"page_number": 1, "text": text}]
+    return []
+
+
+def extract_pages_from_txt(txt_path: str) -> list[dict]:
+    """Read a plain text file as a single 'page'."""
+    text = Path(txt_path).read_text(encoding="utf-8", errors="replace").strip()
+    if text:
+        return [{"page_number": 1, "text": text}]
+    return []
+
+
+EXTRACTORS = {
+    ".pdf": extract_pages_from_pdf,
+    ".pptx": extract_pages_from_pptx,
+    ".docx": extract_pages_from_docx,
+    ".txt": extract_pages_from_txt,
+}
+
+
 def scan_folder(folder_path: str) -> list[dict]:
     """Recursively scan a folder for supported files and extract pages.
 
@@ -53,7 +95,10 @@ def scan_folder(folder_path: str) -> list[dict]:
             continue
 
         relative_path = str(file_path.relative_to(root))
-        pages = extract_pages_from_pdf(str(file_path))
+        extractor = EXTRACTORS.get(file_path.suffix.lower())
+        if not extractor:
+            continue
+        pages = extractor(str(file_path))
 
         for page in pages:
             all_pages.append({

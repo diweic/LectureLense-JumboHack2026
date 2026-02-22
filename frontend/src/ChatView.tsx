@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { chatWithSlides, getPdfUrl } from "./api";
+import { chatWithSlides, getPdfUrl, getFileUrl, isPdf } from "./api";
 import type { ChatMessage, ChatSource } from "./api";
 
 interface DisplayMessage {
@@ -81,11 +81,11 @@ function ChatView() {
                   <a
                     key={j}
                     className="chat-source-link"
-                    href={getPdfUrl(s.file_path, s.page_number)}
+                    href={isPdf(s.file_path) ? getPdfUrl(s.file_path, s.page_number) : getFileUrl(s.file_path)}
                     target="_blank"
                     rel="noopener noreferrer"
                   >
-                    {s.file_path} p{s.page_number}
+                    {s.file_path}{isPdf(s.file_path) ? ` p${s.page_number}` : ""}
                   </a>
                 ))}
               </div>

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { browseFolder, indexFolder, searchSlides, summarize, getPdfUrl, getPageImageUrl } from "./api";
+import { browseFolder, indexFolder, searchSlides, summarize, getPdfUrl, getPageImageUrl, getFileUrl, isPdf } from "./api";
 import type { SearchResult, IndexResponse } from "./api";
 import ChatView from "./ChatView";
 import "./App.css";
@@ -390,11 +390,11 @@ function App() {
                   </span>
                   <a
                     className="btn btn-open"
-                    href={getPdfUrl(group.filePath)}
+                    href={isPdf(group.filePath) ? getPdfUrl(group.filePath) : getFileUrl(group.filePath)}
                     target="_blank"
                     rel="noopener noreferrer"
                   >
-                    Open PDF
+                    {isPdf(group.filePath) ? "Open PDF" : "Open File"}
                   </a>
                 </div>
                 {group.results.map((r) => (
@@ -403,31 +403,51 @@ function App() {
                     className="result-subcard"
                   >
                     <div className="result-header">
-                      <span className="result-page">Page {r.page_number}</span>
+                      <span className="result-page">
+                        {isPdf(r.file_path) ? `Page ${r.page_number}` : `Page ${r.page_number}`}
+                      </span>
                       <span className="result-score">
                         {(r.similarity_score * 100).toFixed(1)}% match
                       </span>
-                      <a
-                        className="btn btn-open-small"
-                        href={getPdfUrl(r.file_path, r.page_number)}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                      >
-                        Go to page
-                      </a>
+                      {isPdf(r.file_path) ? (
+                        <a
+                          className="btn btn-open-small"
+                          href={getPdfUrl(r.file_path, r.page_number)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          Go to page
+                        </a>
+                      ) : (
+                        <a
+                          className="btn btn-open-small"
+                          href={getFileUrl(r.file_path)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          Open file
+                        </a>
+                      )}
                     </div>
-                    <img
-                      className="result-thumbnail"
-                      src={getPageImageUrl(r.file_path, r.page_number)}
-                      alt={`${r.file_path} page ${r.page_number}`}
-                      loading="lazy"
-                      onClick={() =>
-                        setPreviewImage({
-                          url: getPageImageUrl(r.file_path, r.page_number),
-                          label: `${r.file_path} — Page ${r.page_number}`,
-                        })
-                      }
-                    />
+                    {isPdf(r.file_path) ? (
+                      <img
+                        className="result-thumbnail"
+                        src={getPageImageUrl(r.file_path, r.page_number)}
+                        alt={`${r.file_path} page ${r.page_number}`}
+                        loading="lazy"
+                        onClick={() =>
+                          setPreviewImage({
+                            url: getPageImageUrl(r.file_path, r.page_number),
+                            label: `${r.file_path} — Page ${r.page_number}`,
+                          })
+                        }
+                      />
+                    ) : (
+                      <div className="result-text-preview">
+                        {r.full_text.slice(0, 500)}
+                        {r.full_text.length > 500 && "..."}
+                      </div>
+                    )}
                     <p className="result-snippet">
                       {highlightSnippet(r.text_snippet, lastQuery)}
                     </p>

@@ -517,6 +517,22 @@ body {
   transform: scale(1.02);
 }
 
+.result-text-preview {
+  max-width: 600px;
+  max-height: 160px;
+  overflow-y: auto;
+  margin: 0.4rem 0;
+  padding: 0.6rem 0.8rem;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* Slide preview modal */
 .modal-overlay {
   position: fixed;

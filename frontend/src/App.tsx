@@ -1,6 +1,7 @@
-import { useState, useRef } from "react";
-import { browseFolder, indexFolder, searchSlides, getPdfUrl } from "./api";
+import { useState, useRef, useEffect, useCallback } from "react";
+import { browseFolder, indexFolder, searchSlides, summarize, getPdfUrl, getPageImageUrl } from "./api";
 import type { SearchResult, IndexResponse } from "./api";
+import ChatView from "./ChatView";
 import "./App.css";
 
 // ── Helpers ───────────────────────────────────────────────────────
@@ -68,7 +69,16 @@ function groupResults(results: SearchResult[]): ResultGroup[] {
 
 // ── App Component ─────────────────────────────────────────────────
 
+type Tab = "search" | "chat";
+
 function App() {
+  const [activeTab, setActiveTab] = useState<Tab>("search");
+  const [dark, setDark] = useState(false);
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+  }, [dark]);
+
   // Indexing state
   const [folderPath, setFolderPath] = useState("");
   const [indexInfo, setIndexInfo] = useState<IndexResponse | null>(null);
@@ -83,6 +93,57 @@ function App() {
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState("");
   const [lastQuery, setLastQuery] = useState("");
+  const [rerank, setRerank] = useState(false);
+
+  // Slide preview modal state
+  const [previewImage, setPreviewImage] = useState<{ url: string; label: string } | null>(null);
+
+  // Summary state
+  const [showSummaries, setShowSummaries] = useState(false);
+  // key: "file_path::page_number", value: summary text or null (loading)
+  const [summaries, setSummaries] = useState<Record<string, string | null>>({});
+  const summaryAbortRef = useRef(false);
+
+  // Fetch summaries one at a time when toggled on
+  const fetchSummaries = useCallback(
+    async (query: string, items: SearchResult[]) => {
+      summaryAbortRef.current = false;
+      const fetched = new Set<string>();
+      // Snapshot which keys are already done
+      setSummaries((prev) => {
+        for (const k of Object.keys(prev)) {
+          if (prev[k] !== null) fetched.add(k);
+        }
+        return prev;
+      });
+
+      for (const r of items) {
+        if (summaryAbortRef.current) break;
+        const key = `${r.file_path}::${r.page_number}`;
+        if (fetched.has(key)) continue;
+
+        setSummaries((prev) => ({ ...prev, [key]: null })); // null = loading
+        try {
+          const res = await summarize(query, r.full_text);
+          if (summaryAbortRef.current) break;
+          setSummaries((prev) => ({ ...prev, [key]: res.summary }));
+        } catch {
+          if (summaryAbortRef.current) break;
+          setSummaries((prev) => ({ ...prev, [key]: "Summary unavailable." }));
+        }
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (showSummaries && results.length > 0 && lastQuery) {
+      fetchSummaries(lastQuery, results);
+    }
+    return () => {
+      summaryAbortRef.current = true;
+    };
+  }, [showSummaries, results, lastQuery, fetchSummaries]);
 
   const handleIndex = async () => {
     if (!folderPath.trim()) return;
@@ -119,10 +180,12 @@ function App() {
   const handleSearch = async () => {
     const q = query.trim();
     if (!q) return;
+    summaryAbortRef.current = true;
     setSearching(true);
     setSearchError("");
+    setSummaries({});
     try {
-      const res = await searchSlides(q);
+      const res = await searchSlides(q, 10, rerank);
       setResults(res.results);
       setLastQuery(q);
     } catch (e) {
@@ -141,14 +204,17 @@ function App() {
   };
 
   const handleNewSearch = () => {
+    summaryAbortRef.current = true;
     setQuery("");
     setResults([]);
     setLastQuery("");
     setSearchError("");
+    setSummaries({});
     setTimeout(() => searchInputRef.current?.focus(), 0);
   };
 
   const handleChangeFolder = () => {
+    summaryAbortRef.current = true;
     setFolderPath("");
     setIndexInfo(null);
     setIndexError("");
@@ -156,6 +222,7 @@ function App() {
     setResults([]);
     setLastQuery("");
     setSearchError("");
+    setSummaries({});
   };
 
   // Derived data
@@ -165,10 +232,29 @@ function App() {
   return (
     <div className="app">
       <header className="header">
-        <h1>Slide Search</h1>
+        <div className="header-row">
+          <h1>LectureLens</h1>
+          <button className="btn btn-theme" onClick={() => setDark((d) => !d)}>
+            {dark ? "Light" : "Dark"}
+          </button>
+        </div>
         <p className="subtitle">
-          Find concepts in your course slides using semantic search
+          AI-powered search across your lecture slides
         </p>
+        <nav className="tab-bar">
+          <button
+            className={`tab ${activeTab === "search" ? "tab-active" : ""}`}
+            onClick={() => setActiveTab("search")}
+          >
+            Search
+          </button>
+          <button
+            className={`tab ${activeTab === "chat" ? "tab-active" : ""}`}
+            onClick={() => setActiveTab("chat")}
+          >
+            Chat
+          </button>
+        </nav>
       </header>
 
       {/* Index Section */}
@@ -213,10 +299,14 @@ function App() {
           <div className="index-info">
             Indexed <strong>{indexInfo.total_pages}</strong> pages across{" "}
             <strong>{indexInfo.total_files}</strong> files
+            {indexInfo.message && (
+              <span className="index-cache-note"> — {indexInfo.message}</span>
+            )}
           </div>
         )}
       </section>
 
+      {activeTab === "search" && <>
       {/* Search Section */}
       <section className="search-section">
         <p className="search-hint">
@@ -238,9 +328,19 @@ function App() {
             onClick={handleSearch}
             disabled={searching || !query.trim()}
           >
-            {searching ? "Searching..." : "Search"}
+            {searching ? (rerank ? "Re-ranking with AI..." : "Searching...") : "Search"}
           </button>
         </div>
+        <label className="rerank-toggle">
+          <input
+            type="checkbox"
+            checked={rerank}
+            onChange={(e) => setRerank(e.target.checked)}
+            disabled={searching}
+          />
+          AI Re-ranking
+          <span className="rerank-hint">(slower, better relevance)</span>
+        </label>
         {searchError && <p className="error">{searchError}</p>}
       </section>
 
@@ -252,6 +352,12 @@ function App() {
               Results for &ldquo;{lastQuery}&rdquo;
             </h2>
             <div className="results-actions">
+              <button
+                className={`btn btn-toggle ${showSummaries ? "btn-toggle-on" : ""}`}
+                onClick={() => setShowSummaries((v) => !v)}
+              >
+                {showSummaries ? "AI Summaries On" : "AI Summaries Off"}
+              </button>
               <button className="btn btn-secondary" onClick={handleNewSearch}>
                 New Search
               </button>
@@ -310,9 +416,45 @@ function App() {
                         Go to page
                       </a>
                     </div>
+                    <img
+                      className="result-thumbnail"
+                      src={getPageImageUrl(r.file_path, r.page_number)}
+                      alt={`${r.file_path} page ${r.page_number}`}
+                      loading="lazy"
+                      onClick={() =>
+                        setPreviewImage({
+                          url: getPageImageUrl(r.file_path, r.page_number),
+                          label: `${r.file_path} — Page ${r.page_number}`,
+                        })
+                      }
+                    />
                     <p className="result-snippet">
                       {highlightSnippet(r.text_snippet, lastQuery)}
                     </p>
+                    {showSummaries && (() => {
+                      const key = `${r.file_path}::${r.page_number}`;
+                      const summary = summaries[key];
+                      if (summary === undefined) {
+                        // Hasn't started yet (queued)
+                        return (
+                          <div className="result-summary result-summary-loading">
+                            <span className="spinner spinner-small" /> Waiting...
+                          </div>
+                        );
+                      }
+                      if (summary === null) {
+                        return (
+                          <div className="result-summary result-summary-loading">
+                            <span className="spinner spinner-small" /> Generating summary...
+                          </div>
+                        );
+                      }
+                      return (
+                        <div className="result-summary result-summary-ready">
+                          <strong>AI:</strong> {summary}
+                        </div>
+                      );
+                    })()}
                   </div>
                 ))}
               </div>
@@ -323,6 +465,28 @@ function App() {
 
       {lastQuery && results.length === 0 && !searching && (
         <p className="no-results">No results found for &ldquo;{lastQuery}&rdquo;</p>
+      )}
+      </>}
+
+      {activeTab === "chat" && <ChatView />}
+
+      {/* Slide preview modal */}
+      {previewImage && (
+        <div className="modal-overlay" onClick={() => setPreviewImage(null)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <span className="modal-label">{previewImage.label}</span>
+              <button className="btn modal-close" onClick={() => setPreviewImage(null)}>
+                Close
+              </button>
+            </div>
+            <img
+              className="modal-image"
+              src={previewImage.url}
+              alt={previewImage.label}
+            />
+          </div>
+        </div>
       )}
     </div>
   );

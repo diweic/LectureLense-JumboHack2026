@@ -6,6 +6,7 @@ Designed to be modular: add new file processors (e.g. PPTX) alongside
 the PDF processor without refactoring.
 """
 
+import hashlib
 import os
 from pathlib import Path
 
@@ -70,16 +71,52 @@ def generate_embeddings(texts: list[str]) -> list[list[float]]:
     return result.embeddings
 
 
+def _folder_fingerprint(folder_path: str) -> str:
+    """Compute a hash of file paths + modification times in a folder."""
+    root = Path(folder_path)
+    entries = []
+    for fp in sorted(root.rglob("*")):
+        if fp.suffix.lower() in SUPPORTED_EXTENSIONS and fp.is_file():
+            entries.append(f"{fp}:{fp.stat().st_mtime_ns}")
+    return hashlib.sha256("\n".join(entries).encode()).hexdigest()[:16]
+
+
 def index_folder(folder_path: str) -> dict:
     """Index all supported files in a folder into ChromaDB.
 
-    Returns a summary dict with counts.
+    Returns a summary dict with counts. Skips re-indexing if unchanged.
     """
+    fingerprint = _folder_fingerprint(folder_path)
+
+    # Check if already indexed with same fingerprint
+    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    try:
+        collection = client.get_collection(COLLECTION_NAME)
+        root_doc = collection.get(ids=["__root__"])
+        if root_doc["metadatas"]:
+            stored_fp = root_doc["metadatas"][0].get("fingerprint")
+            stored_root = root_doc["metadatas"][0].get("root_folder")
+            if stored_fp == fingerprint and stored_root == folder_path:
+                # Count existing documents (minus the __root__ marker)
+                total = collection.count() - 1
+                files = set()
+                # Get all unique file paths from metadata
+                all_meta = collection.get(where={"file_path": {"$ne": "__root__"}})
+                for m in all_meta["metadatas"]:
+                    files.add(m["file_path"])
+                return {
+                    "status": "ok",
+                    "total_pages": total,
+                    "total_files": len(files),
+                    "files": sorted(files),
+                    "message": "Already indexed (no changes detected)",
+                }
+    except Exception:
+        pass
+
     pages = scan_folder(folder_path)
     if not pages:
         return {"status": "error", "message": "No supported files found", "total_pages": 0}
-
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
 
     # Delete existing collection if re-indexing
     try:
@@ -98,7 +135,7 @@ def index_folder(folder_path: str) -> dict:
     collection.add(
         ids=["__root__"],
         documents=["__root_folder__"],
-        metadatas=[{"file_path": "__root__", "page_number": 0, "root_folder": folder_path}],
+        metadatas=[{"file_path": "__root__", "page_number": 0, "root_folder": folder_path, "fingerprint": fingerprint}],
         embeddings=[generate_embeddings(["root folder marker"])[0]],
     )
 

@@ -4,6 +4,7 @@ export interface SearchResult {
   file_path: string;
   page_number: number;
   text_snippet: string;
+  full_text: string;
   similarity_score: number;
 }
 
@@ -49,18 +50,78 @@ export async function indexFolder(folderPath: string): Promise<IndexResponse> {
 
 export async function searchSlides(
   query: string,
-  nResults = 10
+  nResults = 10,
+  rerank = false
 ): Promise<SearchResponse> {
   const res = await fetch(`${BASE}/search`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query, n_results: nResults }),
+    body: JSON.stringify({ query, n_results: nResults, rerank }),
   });
   if (!res.ok) {
     const err = await res.json();
     throw new Error(err.detail || "Search failed");
   }
   return res.json();
+}
+
+export interface SummarizeResponse {
+  summary: string;
+}
+
+export async function summarize(
+  query: string,
+  text: string
+): Promise<SummarizeResponse> {
+  const res = await fetch(`${BASE}/summarize`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query, text }),
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.detail || "Summary failed");
+  }
+  return res.json();
+}
+
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface ChatSource {
+  file_path: string;
+  page_number: number;
+}
+
+export interface ChatResponse {
+  answer: string;
+  sources: ChatSource[];
+}
+
+export async function chatWithSlides(
+  question: string,
+  history: ChatMessage[] = []
+): Promise<ChatResponse> {
+  const res = await fetch(`${BASE}/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question, history }),
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.detail || "Chat failed");
+  }
+  return res.json();
+}
+
+export function getPageImageUrl(filePath: string, page: number): string {
+  const encoded = filePath
+    .split("/")
+    .map(encodeURIComponent)
+    .join("/");
+  return `${BASE}/page-image/${encoded}?page=${page}`;
 }
 
 export function getPdfUrl(filePath: string, page?: number): string {
